@@ -1,0 +1,4 @@
+# Ignore transient build and staging artifacts
+downloads/
+staging/
+output/
