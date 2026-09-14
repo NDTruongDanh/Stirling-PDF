@@ -1,9 +1,13 @@
 ; installer.iss
 ; Inno Setup script for Stirling-PDF All-in-One Offline Windows Installer
 
+#ifndef AppVersion
+#define AppVersion "2.14.3"
+#endif
+
 [Setup]
 AppName=Stirling PDF
-AppVersion=2.14.3
+AppVersion={#AppVersion}
 AppPublisher=Stirling-Tools
 AppPublisherURL=https://github.com/Stirling-Tools/Stirling-PDF
 AppSupportURL=https://github.com/Stirling-Tools/Stirling-PDF/issues

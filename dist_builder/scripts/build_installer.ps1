@@ -1,6 +1,10 @@
 # build_installer.ps1
 # Complete build automation for Stirling-PDF All-in-One Offline Windows Installer
 
+param(
+    [string]$AppVersion = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -42,7 +46,14 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 # 4. Compile Installer
 Write-Host "[-] Compiling installer with Inno Setup (this may take a few minutes due to ultra compression)..." -ForegroundColor Cyan
-& $Iscc "$IssFile"
+$isccArgs = @()
+if ($AppVersion -and $AppVersion.Trim() -ne "") {
+    $cleanVersion = $AppVersion.TrimStart('v')
+    $isccArgs += "/DAppVersion=$cleanVersion"
+    Write-Host ("[OK] Setting AppVersion: " + $cleanVersion) -ForegroundColor Green
+}
+$isccArgs += "$IssFile"
+& $Iscc @isccArgs
 if ($LASTEXITCODE -ne 0) {
     throw ("Inno Setup compilation failed with exit code " + $LASTEXITCODE)
 }

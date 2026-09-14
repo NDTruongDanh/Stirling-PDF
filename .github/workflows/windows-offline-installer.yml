@@ -1,0 +1,123 @@
+name: Build Windows Offline Installer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'dist_builder/**'
+      - '.github/workflows/windows-offline-installer.yml'
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  schedule:
+    # Weekly Sunday build at 03:00 UTC to catch upstream updates
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: 'Version string (e.g. 2.14.3, leave blank to auto-detect)'
+        required: false
+        type: string
+        default: ''
+      upload_release:
+        description: 'Upload built installer to GitHub Release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build All-in-One Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $isccPath = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $isccPath) {
+            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            if (Test-Path $isccPath) {
+              echo "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+            }
+          }
+          Write-Host "Inno Setup compiler available at: $isccPath"
+
+      - name: Determine Application Version
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.app_version }}"
+          if (-not $ver -or $ver.Trim() -eq "") {
+            if ("${{ github.event.release.tag_name }}") {
+              $ver = "${{ github.event.release.tag_name }}"
+            } elseif ($env:GITHUB_REF -like "refs/tags/v*") {
+              $ver = $env:GITHUB_REF.Substring(11)
+            } else {
+              # Fallback: Query latest Stirling-PDF release tag from GitHub API
+              try {
+                $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/Stirling-Tools/Stirling-PDF/releases/latest" -Headers @{"User-Agent"="GitHub-Action"}
+                $ver = $releaseInfo.tag_name
+              } catch {
+                $ver = "2.14.3"
+              }
+            }
+          }
+          $cleanVer = $ver.TrimStart('v')
+          Write-Host "Resolved installer version: $cleanVer"
+          echo "INSTALLER_VERSION=$cleanVer" >> $env:GITHUB_ENV
+
+      - name: Fetch Runtime Dependencies & Stage
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File dist_builder\scripts\fetch_assets.ps1
+
+      - name: Compile Windows Installer (.exe)
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File dist_builder\scripts\build_installer.ps1 -AppVersion $env:INSTALLER_VERSION
+
+      - name: Compute SHA-256 Checksum
+        shell: pwsh
+        run: |
+          $exePath = "dist_builder\output\StirlingPDF-Full-Setup.exe"
+          $hash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash
+          $shaFile = "dist_builder\output\StirlingPDF-Full-Setup.exe.sha256"
+          Set-Content -Path $shaFile -Value "$hash  StirlingPDF-Full-Setup.exe"
+          Write-Host "SHA256: $hash"
+          echo "INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV
+
+      - name: Upload Installer as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StirlingPDF-Full-Setup-${{ env.INSTALLER_VERSION }}
+          path: |
+            dist_builder/output/StirlingPDF-Full-Setup.exe
+            dist_builder/output/StirlingPDF-Full-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.upload_release == true)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          files: |
+            dist_builder/output/StirlingPDF-Full-Setup.exe
+            dist_builder/output/StirlingPDF-Full-Setup.exe.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
