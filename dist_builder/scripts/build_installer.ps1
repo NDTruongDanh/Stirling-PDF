@@ -2,7 +2,8 @@
 # Complete build automation for Stirling-PDF All-in-One Offline Windows Installer
 
 param(
-    [string]$AppVersion = ""
+    [string]$AppVersion = "",
+    [string]$CustomJarPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +19,7 @@ Write-Host "==================================================" -ForegroundColor
 
 # 1. Fetch assets if needed
 $FetchScript = Join-Path $ScriptDir "fetch_assets.ps1"
-& $FetchScript
+& $FetchScript -CustomJarPath $CustomJarPath
 
 # 2. Locate Inno Setup Compiler (ISCC.exe)
 $Iscc = "iscc"

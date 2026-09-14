@@ -1,10 +1,15 @@
 # fetch_assets.ps1
 # Automates downloading, extracting, and configuring all runtime dependencies for Stirling-PDF offline installer.
 
+param(
+    [string]$CustomJarPath = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BaseDir = Split-Path -Parent $ScriptDir
+$RepoRoot = Split-Path -Parent $BaseDir
 $StagingDir = Join-Path $BaseDir "staging"
 $DownloadsDir = Join-Path $BaseDir "downloads"
 
@@ -71,7 +76,7 @@ function Download-FileWithCurl {
     Write-Host ("[-] Downloading " + $Description + "...") -ForegroundColor Cyan
     Write-Host ("    Source: " + $Url)
     Write-Host ("    Target: " + $OutFile)
-    & curl.exe -L -f --retry 3 --retry-delay 2 -A "Mozilla/5.0" -o "$OutFile" "$Url"
+    & curl.exe -L -C - --retry 5 --retry-delay 2 -A "Mozilla/5.0" -o "$OutFile" "$Url"
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutFile)) {
         throw ("Failed to download " + $Description + " from " + $Url)
     }
@@ -84,18 +89,35 @@ function Download-FileWithCurl {
 # 1. Stirling-PDF Full-Stack JAR (with Web UI)
 # ----------------------------------------------------
 $JarTarget = Join-Path $StagingDir "app\Stirling-PDF.jar"
-if (-not (Test-Path $JarTarget) -or (Get-Item $JarTarget).Length -lt 200000000) {
-    $JarUrl = "https://github.com/Stirling-Tools/Stirling-PDF/releases/latest/download/Stirling-PDF.jar"
-    $JarDownload = Join-Path $DownloadsDir "Stirling-PDF.jar"
-    Download-FileWithCurl -Url $JarUrl -OutFile $JarDownload -Description "Stirling-PDF Full-Stack JAR (with Web UI)"
-    Copy-Item -Path $JarDownload -Destination $JarTarget -Force
-    # Clean up old server-only jar if present
-    $oldServerJar = Join-Path $StagingDir "app\Stirling-PDF-server.jar"
-    if (Test-Path $oldServerJar) { Remove-Item -Force $oldServerJar -ErrorAction SilentlyContinue }
-    Write-Host "[OK] Stirling-PDF.jar (with Web UI) staged successfully." -ForegroundColor Green
+
+if ($CustomJarPath -and (Test-Path $CustomJarPath)) {
+    Write-Host ("[OK] Using custom JAR: " + $CustomJarPath) -ForegroundColor Green
+    Copy-Item -Path $CustomJarPath -Destination $JarTarget -Force
 } else {
-    Write-Host "[OK] Stirling-PDF.jar (with Web UI) already present in staging." -ForegroundColor Yellow
+    # Check for locally compiled JAR from source
+    $localLibsDir = Join-Path $RepoRoot "app\core\build\libs"
+    $localJars = @()
+    if (Test-Path $localLibsDir) {
+        $localJars = Get-ChildItem -Path $localLibsDir -Filter "stirling-pdf-*.jar" | Where-Object { $_.Name -notmatch "plain" }
+    }
+
+    if ($localJars.Count -gt 0) {
+        $latestLocalJar = $localJars | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Write-Host ("[OK] Found locally compiled JAR: " + $latestLocalJar.FullName) -ForegroundColor Green
+        Copy-Item -Path $latestLocalJar.FullName -Destination $JarTarget -Force
+    } elseif (-not (Test-Path $JarTarget) -or (Get-Item $JarTarget).Length -lt 200000000) {
+        $JarUrl = "https://github.com/Stirling-Tools/Stirling-PDF/releases/latest/download/Stirling-PDF.jar"
+        $JarDownload = Join-Path $DownloadsDir "Stirling-PDF.jar"
+        Download-FileWithCurl -Url $JarUrl -OutFile $JarDownload -Description "Stirling-PDF Full-Stack JAR (with Web UI)"
+        Copy-Item -Path $JarDownload -Destination $JarTarget -Force
+    } else {
+        Write-Host "[OK] Stirling-PDF.jar (with Web UI) already present in staging." -ForegroundColor Yellow
+    }
 }
+
+# Clean up old server-only jar if present
+$oldServerJar = Join-Path $StagingDir "app\Stirling-PDF-server.jar"
+if (Test-Path $oldServerJar) { Remove-Item -Force $oldServerJar -ErrorAction SilentlyContinue }
 
 # ----------------------------------------------------
 # 2. Minimal Custom JRE (via jlink)

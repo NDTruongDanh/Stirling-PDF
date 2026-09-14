@@ -5,7 +5,12 @@ on:
     branches:
       - main
     paths:
+      - 'app/**'
+      - 'frontend/**'
       - 'dist_builder/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle/**'
       - '.github/workflows/windows-offline-installer.yml'
     tags:
       - 'v*'
@@ -16,6 +21,11 @@ on:
     - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
+      build_from_source:
+        description: 'Build JAR with Frontend from repository source (true) or use latest release JAR (false)'
+        required: false
+        type: boolean
+        default: true
       app_version:
         description: 'Version string (e.g. 2.14.3, leave blank to auto-detect)'
         required: false
@@ -38,25 +48,50 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '21'
+          java-version: '25'
+
+      - name: Set up Node.js
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_from_source == true }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Cache Gradle
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_from_source == true }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-installer-${{ runner.os }}-jdk-25-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'build.gradle', 'app/**/build.gradle') }}
+          restore-keys: |
+            gradle-installer-${{ runner.os }}-jdk-25-
+
+      - name: Cache Offline Assets
+        uses: actions/cache@v4
+        with:
+          path: dist_builder/downloads
+          key: offline-assets-v1-${{ hashFiles('dist_builder/scripts/fetch_assets.ps1') }}
+          restore-keys: |
+            offline-assets-v1-
 
       - name: Install Inno Setup
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          $isccPath = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $isccPath) {
-            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-            if (Test-Path $isccPath) {
-              echo "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
-            }
+          $isccDir = "C:\Program Files (x86)\Inno Setup 6"
+          if (Test-Path $isccDir) {
+            echo "$isccDir" >> $env:GITHUB_PATH
           }
-          Write-Host "Inno Setup compiler available at: $isccPath"
 
       - name: Determine Application Version
         shell: pwsh
@@ -68,7 +103,6 @@ jobs:
             } elseif ($env:GITHUB_REF -like "refs/tags/v*") {
               $ver = $env:GITHUB_REF.Substring(11)
             } else {
-              # Fallback: Query latest Stirling-PDF release tag from GitHub API
               try {
                 $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/Stirling-Tools/Stirling-PDF/releases/latest" -Headers @{"User-Agent"="GitHub-Action"}
                 $ver = $releaseInfo.tag_name
@@ -81,10 +115,14 @@ jobs:
           Write-Host "Resolved installer version: $cleanVer"
           echo "INSTALLER_VERSION=$cleanVer" >> $env:GITHUB_ENV
 
-      - name: Fetch Runtime Dependencies & Stage
+      - name: Build JAR with Web UI from source
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_from_source == true }}
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File dist_builder\scripts\fetch_assets.ps1
+          cd frontend
+          npm ci
+          cd ..
+          ./gradlew bootJar -PbuildWithFrontend=true -PjpdfiumPlatforms=windows-x64 -x test -x spotlessCheck -x sonarqube --no-daemon
 
       - name: Compile Windows Installer (.exe)
         shell: pwsh
