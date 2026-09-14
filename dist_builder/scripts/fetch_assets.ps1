@@ -31,13 +31,24 @@ if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
 }
 Write-Host "[OK] 7-Zip found: $SevenZip" -ForegroundColor Green
 
-# Resolve jlink
-$JLink = "jlink"
-if (-not (Get-Command jlink -ErrorAction SilentlyContinue)) {
-    if (Test-Path "C:\Program Files\Java\jdk-21.0.10\bin\jlink.exe") {
-        $JLink = "C:\Program Files\Java\jdk-21.0.10\bin\jlink.exe"
+# Resolve jlink (prioritize JDK 25 matching modernJavaVersion)
+$JLink = ""
+$jlinkCandidates = @(
+    "C:\Program Files\Java\jdk-25.0.3\bin\jlink.exe",
+    "C:\Program Files\Java\latest\bin\jlink.exe",
+    "$env:JAVA_HOME\bin\jlink.exe"
+)
+foreach ($cand in $jlinkCandidates) {
+    if ($cand -and (Test-Path $cand)) {
+        $JLink = $cand
+        break
+    }
+}
+if (-not $JLink -or -not (Test-Path $JLink)) {
+    if (Get-Command jlink -ErrorAction SilentlyContinue) {
+        $JLink = (Get-Command jlink).Source
     } else {
-        throw "jlink executable not found on PATH or in JDK 21 standard locations"
+        throw "jlink executable not found. Please install JDK 25."
     }
 }
 Write-Host "[OK] jlink found: $JLink" -ForegroundColor Green
@@ -70,38 +81,54 @@ function Download-FileWithCurl {
 }
 
 # ----------------------------------------------------
-# 1. Stirling-PDF Server JAR
+# 1. Stirling-PDF Full-Stack JAR (with Web UI)
 # ----------------------------------------------------
-$JarTarget = Join-Path $StagingDir "app\Stirling-PDF-server.jar"
-if (-not (Test-Path $JarTarget) -or (Get-Item $JarTarget).Length -lt 100000000) {
-    $JarUrl = "https://github.com/Stirling-Tools/Stirling-PDF/releases/latest/download/Stirling-PDF-server.jar"
-    $JarDownload = Join-Path $DownloadsDir "Stirling-PDF-server.jar"
-    Download-FileWithCurl -Url $JarUrl -OutFile $JarDownload -Description "Stirling-PDF Server JAR"
+$JarTarget = Join-Path $StagingDir "app\Stirling-PDF.jar"
+if (-not (Test-Path $JarTarget) -or (Get-Item $JarTarget).Length -lt 200000000) {
+    $JarUrl = "https://github.com/Stirling-Tools/Stirling-PDF/releases/latest/download/Stirling-PDF.jar"
+    $JarDownload = Join-Path $DownloadsDir "Stirling-PDF.jar"
+    Download-FileWithCurl -Url $JarUrl -OutFile $JarDownload -Description "Stirling-PDF Full-Stack JAR (with Web UI)"
     Copy-Item -Path $JarDownload -Destination $JarTarget -Force
-    Write-Host "[OK] Stirling-PDF-server.jar staged successfully." -ForegroundColor Green
+    # Clean up old server-only jar if present
+    $oldServerJar = Join-Path $StagingDir "app\Stirling-PDF-server.jar"
+    if (Test-Path $oldServerJar) { Remove-Item -Force $oldServerJar -ErrorAction SilentlyContinue }
+    Write-Host "[OK] Stirling-PDF.jar (with Web UI) staged successfully." -ForegroundColor Green
 } else {
-    Write-Host "[OK] Stirling-PDF-server.jar already present in staging." -ForegroundColor Yellow
+    Write-Host "[OK] Stirling-PDF.jar (with Web UI) already present in staging." -ForegroundColor Yellow
 }
 
 # ----------------------------------------------------
 # 2. Minimal Custom JRE (via jlink)
 # ----------------------------------------------------
 $JreTarget = Join-Path $StagingDir "jre"
-if (-not (Test-Path "$JreTarget\bin\javaw.exe")) {
-    Write-Host "[-] Creating minimal custom JRE via jlink..." -ForegroundColor Cyan
+$needJreBuild = $true
+$releaseFile = Join-Path $JreTarget "release"
+if (Test-Path $releaseFile) {
+    $relContent = Get-Content $releaseFile -Raw
+    if ($relContent -match 'JAVA_VERSION="25\.') {
+        $needJreBuild = $false
+        Write-Host "[OK] Custom JRE 25 already present in staging." -ForegroundColor Yellow
+    } else {
+        Write-Host "[!] Existing JRE is not Java 25. Rebuilding runtime..." -ForegroundColor Yellow
+    }
+}
+
+if ($needJreBuild) {
+    Write-Host "[-] Creating minimal custom JRE 25 via jlink..." -ForegroundColor Cyan
     if (Test-Path $JreTarget) {
         Remove-Item -Recurse -Force $JreTarget
     }
     
-    $modules = "java.base,java.desktop,java.sql,java.net.http,java.management,java.naming,java.security.jgss,java.instrument,java.xml,jdk.unsupported,java.logging,java.security.sasl,jdk.crypto.ec,jdk.zipfs"
+    $modules = "java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported,jdk.dynalink,jdk.crypto.mscapi,jdk.zipfs"
     & $JLink --add-modules $modules --output $JreTarget --no-header-files --no-man-pages --strip-debug --compress=2
     
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$JreTarget\bin\javaw.exe")) {
         throw "jlink failed to create stripped JRE runtime"
     }
-    Write-Host "[OK] Custom minimal JRE created at $JreTarget" -ForegroundColor Green
-} else {
-    Write-Host "[OK] Custom JRE already exists in staging." -ForegroundColor Yellow
+
+    # Reset read-only flags
+    Get-ChildItem -Recurse -File $JreTarget | ForEach-Object { $_.IsReadOnly = $false }
+    Write-Host "[OK] Custom minimal JRE 25 created at $JreTarget" -ForegroundColor Green
 }
 
 # ----------------------------------------------------
@@ -221,6 +248,25 @@ if (Test-Path $IconSource) {
     Copy-Item -Path $IconSource -Destination "$StagingDir\launcher\icon.ico" -Force
     Write-Host "[OK] Brand icons staged successfully." -ForegroundColor Green
 }
+
+# ----------------------------------------------------
+# 7. Native Desktop Launcher (StirlingPDF.exe)
+# ----------------------------------------------------
+Write-Host "[-] Building native desktop launcher (StirlingPDF.exe)..." -ForegroundColor Cyan
+$LauncherSrc = Join-Path $BaseDir "launcher\Program.cs"
+$LauncherTarget = Join-Path $StagingDir "StirlingPDF.exe"
+$Csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$IconPath = Join-Path $StagingDir "app\icon.ico"
+
+if (-not (Test-Path $Csc)) {
+    throw "C# compiler (csc.exe) not found at $Csc"
+}
+
+& $Csc /nologo /target:winexe /win32icon:"$IconPath" /out:"$LauncherTarget" /reference:System.Windows.Forms.dll,System.Drawing.dll,System.dll "$LauncherSrc"
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $LauncherTarget)) {
+    throw "Failed to compile StirlingPDF.exe launcher"
+}
+Write-Host "[OK] StirlingPDF.exe compiled successfully." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[OK] All dependencies fetched and verified successfully!" -ForegroundColor Green
